@@ -1,7 +1,9 @@
 package raft
 
-import "log"
-
+import (
+	"log"
+	"math/rand"
+)
 // Debugging
 const Debug = false
 
@@ -10,4 +12,9 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 		log.Printf(format, a...)
 	}
 	return
+}
+
+func GetRandomElectTimeout(rd *rand.Rand) int {
+	plusMs := int(rd.Float64() * 500.0)
+	return plusMs + ElectTimeOutBase
 }
