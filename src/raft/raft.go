@@ -86,12 +86,13 @@ type Raft struct {
 	votedFor    int
 	log         []Entry
 
-	commitIndex int           // 将要提交的日志的最高索引
-	lastApplied int           // 已经被应用到状态机的日志的最高索引
-	nextIndex   []int         // 复制到某一个follower时, log开始的索引
-	matchIndex  []int         // 已经被复制到follower的日志的最高索引
-	applyCh     chan ApplyMsg // 用于在应用到状态机时传递消息
-	condApply   *sync.Cond
+	commitIndex int   // 将要提交的日志的最高索引
+	lastApplied int   // 已经被应用到状态机的日志的最高索引
+	nextIndex   []int // 复制到某一个follower时, log开始的索引
+	matchIndex  []int // 已经被复制到follower的日志的最高索引
+
+	applyCh   chan ApplyMsg // 用于在应用到状态机时传递消息
+	condApply *sync.Cond    // 用于阻塞和唤醒CommitChecker
 
 	// 以下不是Figure 2中的field
 	timer *time.Timer // 记录收到消息的时间(心跳或append)
@@ -100,78 +101,11 @@ type Raft struct {
 
 	muVote    sync.Mutex // 保护投票数据voteCount
 	voteCount int        // 得票计数
-}
 
-func (rf *Raft) ResetTimer() {
-	rdTimeOut := GetRandomElectTimeout(rf.rd)
-	rf.timer.Reset(time.Duration(rdTimeOut) * time.Millisecond)
-}
-
-// return currentTerm and whether this server
-// believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
-
-	// Your code here (2A).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.currentTerm, rf.role == Leader
-}
-
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-// before you've implemented snapshots, you should pass nil as the
-// second argument to persister.Save().
-// after you've implemented snapshots, pass the current snapshot
-// (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	e.Encode(rf.currentTerm)
-	raftState := w.Bytes()
-	rf.persister.Save(raftState, nil)
-}
-
-// restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
-
-	var currentTerm int
-	var votedFor int
-	var log []Entry
-	if d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil || d.Decode(&currentTerm) != nil {
-		DPrintf("readPersist failed\n")
-	} else {
-		rf.currentTerm = currentTerm
-		rf.votedFor = votedFor
-		rf.log = log
-	}
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
+	// Lab2D,snapShot
+	snapShot          []byte // 快照，记录的是某条日志所对应的状态机的状态
+	lastIncludedIndex int    // 快照所包含的最后一条日志的索引
+	lastIncludedTerm  int    // 快照所包含的最后一条日志的任期
 }
 
 // example RequestVote RPC arguments structure.
@@ -209,6 +143,156 @@ type AppendEntriesReply struct {
 	XLen    int  // Follower的log的长度
 }
 
+type InstallSnapshotArgs struct {
+	Term              int         // leader’s term
+	LeaderId          int         // so follower can redirect clients
+	LastIncludedIndex int         // the snapshot replaces all entries up through and including this index
+	LastIncludedTerm  int         // term of lastIncludedIndex snapshot file
+	Data              []byte      //[] raw bytes of the snapshot chunk
+	LastIncluedCmd    interface{} // 自己新加的字段, 用于在0处占位
+}
+
+type InstallSnapshotReply struct {
+	Term int // currentTerm, for leader to update itself
+}
+
+// 将全局真实递增的索引称为Virtual Index, 将log切片实际使用的索引称为Real Index,
+// 因此如果SnapShot中包含的最高索引: lastIncludedIndex, 转换的函数应该为:
+// 日志的有效索引从1开始
+
+// 访问rf.log一律使用真实的切片索引, 即Real Index
+// 其余情况, 一律使用全局真实递增的索引Virtual Index
+
+// 调用该函数需要是加锁的状态
+func (rf *Raft) RealLogIdx(vIdx int) int {
+	return vIdx - rf.lastIncludedIndex
+}
+
+// 调用该函数需要是加锁的状态
+func (rf *Raft) VirtualLogIdx(rIdx int) int {
+	return rf.lastIncludedIndex + rIdx
+}
+
+func (rf *Raft) ResetTimer() {
+	rdTimeOut := GetRandomElectTimeout(rf.rd)
+	rf.timer.Reset(time.Duration(rdTimeOut) * time.Millisecond)
+}
+
+// return currentTerm and whether this server
+// believes it is the leader.
+func (rf *Raft) GetState() (int, bool) {
+
+	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.role == Leader
+}
+
+// save Raft's persistent state to stable storage,
+// where it can later be retrieved after a crash and restart.
+// see paper's Figure 2 for a description of what should be persistent.
+// before you've implemented snapshots, you should pass nil as the
+// second argument to persister.Save().
+// after you've implemented snapshots, pass the current snapshot
+// (or nil if there's not yet a snapshot).
+func (rf *Raft) persist() {
+	// Your code here (2C).
+	// Example:
+	// w := new(bytes.Buffer)
+	// e := labgob.NewEncoder(w)
+	// e.Encode(rf.xxx)
+	// e.Encode(rf.yyy)
+	// raftstate := w.Bytes()
+	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	// 2C
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	e.Encode(rf.currentTerm)
+	// 2D
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, rf.snapShot)
+}
+
+// restore previously persisted state.
+func (rf *Raft) readPersist(data []byte) {
+	// 目前只在Make中调用, 因此不需要锁
+	if len(data) == 0 { // bootstrap without any state?
+		return
+	}
+	// Your code here (2C).
+	// Example:
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm int
+	var votedFor int
+	var log []Entry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+
+	if d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil || d.Decode(&currentTerm) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
+		DPrintf("readPersist failed\n")
+	} else {
+		// 2C
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+		// 2D
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
+
+		// 此操作保证了commitIndex和lastApplied的下限, 因为快照包含的索引一定是被提交和应用的, 此操作可以避免后续的索引越界问题
+		rf.commitIndex = lastIncludedIndex
+		rf.lastApplied = lastIncludedIndex
+		DPrintf("server %v  readPersist 成功\n", rf.me)
+	}
+}
+
+// the service says it has created a snapshot that has
+// all info up to and including index. this means the
+// service no longer needs the log through (and including)
+// that index. Raft should now trim its log as much as possible.
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 如果要建立快照的索引大于最后提交的日志的索引，或小于等于上一次快照的索引
+	if rf.commitIndex < index || index <= rf.lastIncludedIndex {
+		DPrintf("server %v 拒绝了 Snapshot 请求, 其index=%v, 自身commitIndex=%v, lastIncludedIndex=%v\n", rf.me, index, rf.commitIndex, rf.lastIncludedIndex)
+		return
+	}
+
+	DPrintf("server %v 同意了 Snapshot 请求, 其index=%v, 自身commitIndex=%v, 原来的lastIncludedIndex=%v, 快照后的lastIncludedIndex=%v\n", rf.me, index, rf.commitIndex, rf.lastIncludedIndex, index)
+
+	// 保存snapShot
+	rf.snapShot = snapshot
+
+	rf.lastIncludedTerm = rf.log[rf.RealLogIdx(index)].Term
+	// 截断日志
+	rf.log = rf.log[rf.RealLogIdx(index):] // 0索引处保存的日志不重要
+	rf.lastIncludedIndex = index
+	if rf.lastApplied < index {
+		rf.lastApplied = index
+	}
+	rf.persist()
+}
+
+func (rf *Raft) readSnapshot(data []byte) {
+	// 目前只在Make中调用, 因此不需要锁
+	if len(data) == 0 {
+		DPrintf("server %v 读取快照失败: 无快照\n", rf.me)
+		return
+	}
+	rf.snapShot = data
+	DPrintf("server %v 读取快照c成功\n", rf.me)
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
@@ -231,13 +315,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 		rf.currentTerm = args.Term
 		rf.role = Follower
+		rf.persist()
 	}
 
 	// at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		// 首先确保是没投过票的
 		if args.LastLogTerm > rf.log[len(rf.log)-1].Term ||
-			(args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1) {
+			(args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= rf.VirtualLogIdx(len(rf.log)-1)) {
 			// 2. If votedFor is null or candidateId, and candidate’s log is least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 			rf.currentTerm = args.Term
 			reply.Term = rf.currentTerm
@@ -319,7 +404,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, *newEntry)
 	rf.persist()
 
-	return len(rf.log) - 1, rf.currentTerm, true
+	return rf.VirtualLogIdx(len(rf.log) - 1), rf.currentTerm, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -342,7 +427,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
@@ -376,7 +461,7 @@ func (rf *Raft) Elect() {
 	args := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.log) - 1,
+		LastLogIndex: rf.VirtualLogIdx(len(rf.log) - 1),
 		LastLogTerm:  rf.log[len(rf.log)-1].Term,
 	}
 
@@ -401,7 +486,7 @@ func (rf *Raft) collectVote(serverTo int, args *RequestVoteArgs) {
 		rf.muVote.Unlock()
 		return
 	}
-	rf.voteCount += 1
+	rf.voteCount++
 	if rf.voteCount > len(rf.peers)/2 {
 		rf.mu.Lock()
 		if rf.role == Follower {
@@ -413,8 +498,9 @@ func (rf *Raft) collectVote(serverTo int, args *RequestVoteArgs) {
 		rf.role = Leader
 		// 当选举出新Leader时，需要重新初始化其nextIndex和matchIndex
 		for i := 0; i < len(rf.nextIndex); i++ {
-			rf.nextIndex[i] = len(rf.log)
-			rf.matchIndex[i] = 0
+			rf.nextIndex[i] = rf.VirtualLogIdx(len(rf.log))
+			// 由于matchIndex初始化为lastIncludedIndex, 因此在崩溃恢复后, 大概率触发InstallSnapshot RPC
+			rf.matchIndex[i] = rf.lastIncludedIndex
 		}
 		rf.mu.Unlock()
 		go rf.SendHeartBeats()
@@ -468,17 +554,29 @@ func (rf *Raft) SendHeartBeats() {
 				PrevLogIndex: rf.nextIndex[i] - 1,
 				LeaderCommit: rf.commitIndex,
 			}
-			if len(rf.log)-1 >= rf.nextIndex[i] {
+
+			sendInstallSnapshot := false
+
+			if args.PrevLogIndex < rf.lastIncludedIndex {
+				// 表示Follower有落后的部分且被截断, 改为发送同步心跳
+				DPrintf("leader %v 取消向 server %v 广播新的心跳, 改为发送sendInstallSnapshot, lastIncludedIndex=%v, nextIndex[%v]=%v, args = %+v \n", rf.me, i, rf.lastIncludedIndex, i, rf.nextIndex[i], args)
+				sendInstallSnapshot = true
+			} else if rf.VirtualLogIdx(len(rf.log)-1) >= args.PrevLogIndex {
 				// 如果有新的log需要发送, 则就是一个真正的AppendEntries而不是心跳
-				args.Entries = rf.log[rf.nextIndex[i]:]
+				args.Entries = rf.log[rf.RealLogIdx(args.PrevLogIndex+1):]
 				DPrintf("leader %v 开始向 server %v 广播新的AppendEntries\n", rf.me, i)
 			} else {
 				// 如果没有新的log发送, 就发送一个长度为0的切片, 表示心跳
 				args.Entries = make([]Entry, 0)
 				DPrintf("leader %v 开始向 server %v 广播新的心跳, args = %+v \n", rf.me, i, args)
 			}
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-			go rf.handleAppendEntries(i, args)
+
+			if sendInstallSnapshot {
+				go rf.handleInstallSnapshot(i)
+			} else {
+				args.PrevLogTerm = rf.log[rf.RealLogIdx(args.PrevLogIndex)].Term
+				go rf.handleAppendEntries(i, args)
+			}
 		}
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(HeartBeatTimeOut) * time.Millisecond)
@@ -523,20 +621,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 校验PrevLogIndex和PrevLogTerm，发现不合法
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if args.PrevLogIndex >= len(rf.log) {
+	if args.PrevLogIndex >= rf.VirtualLogIdx(len(rf.log)) {
 		// PrevLogIndex位置不存在日志项
 		reply.XTerm = -1
-		reply.XLen = len(rf.log) // log长度, 包括了已经snapShot的部分
+		reply.XLen = rf.VirtualLogIdx(len(rf.log)) // log长度, 包括了已经snapShot的部分
 		isConflict = true
 		DPrintf("server %v 检查到AppendEntriesArgs中参数不合法:\n\t args.PrevLogIndex=%v, args.PrevLogTerm=%v, \n\tlen(self.log)=%v, self最后一个位置term为:%v\n", rf.me, args.PrevLogIndex, args.PrevLogTerm, len(rf.log), rf.log[len(rf.log)-1].Term)
-	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	} else if rf.log[rf.RealLogIdx(args.PrevLogIndex)].Term != args.PrevLogTerm {
 		// PrevLogIndex位置的日志项存在, 但term不匹配
-		reply.XTerm = rf.log[args.PrevLogIndex].Term
+		reply.XTerm = rf.log[rf.RealLogIdx(args.PrevLogIndex)].Term
 		i := args.PrevLogIndex
-		for rf.log[i].Term == reply.XTerm {
+		for i > rf.lastIncludedIndex && rf.log[rf.RealLogIdx(i)].Term == reply.XTerm {
 			i--
 		}
 		reply.XIndex = i + 1
+		reply.XLen = rf.VirtualLogIdx(len(rf.log))
 		isConflict = true
 		DPrintf("server %v 的log在PrevLogIndex: %v 位置Term不匹配, args.Term=%v, 实际的term=%v\n", rf.me, args.PrevLogIndex, args.PrevLogTerm, reply.XTerm)
 	}
@@ -571,8 +670,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// }
 
 	// 实际上, 不管是否冲突, 直接移除, 因为可能出现重复的RPC
-	if len(args.Entries) != 0 && len(rf.log) > args.PrevLogIndex+1 {
-		rf.log = rf.log[:args.PrevLogIndex+1]
+	if len(args.Entries) != 0 && rf.VirtualLogIdx(len(rf.log)) > args.PrevLogIndex+1 {
+		rf.log = rf.log[:rf.RealLogIdx(args.PrevLogIndex+1)]
 	}
 
 	// 4. Append any new entries not already in the log
@@ -587,8 +686,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// 5.If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit > len(rf.log)-1 {
-			rf.commitIndex = len(rf.log) - 1
+		if args.LeaderCommit > rf.VirtualLogIdx(len(rf.log)-1) {
+			rf.commitIndex = rf.VirtualLogIdx(len(rf.log) - 1)
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
@@ -619,14 +718,16 @@ func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 		rf.nextIndex[serverTo] = rf.matchIndex[serverTo] + 1
 
 		// 判断为提交的日志是否可以commit
-		N := len(rf.log) - 1
+		N := rf.VirtualLogIdx(len(rf.log) - 1)
 		for N > rf.commitIndex {
 			count := 1 // Leader自己已经包含此条日志条目了
 			for i := 0; i < len(rf.peers); i++ {
 				if rf.me == i {
 					continue
 				}
-				if rf.matchIndex[i] >= N && rf.log[N].Term == rf.currentTerm {
+				if rf.matchIndex[i] >= N && rf.log[rf.RealLogIdx(N)].Term == rf.currentTerm {
+					// TODO: N有没有可能自减到snapShot之前的索引导致log出现负数索引越界?
+					// 解答: 需要确保调用SnapShot时检查索引是否超过commitIndex
 					count++
 				}
 			}
@@ -659,21 +760,41 @@ func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 		// 进行快速回退
 		if reply.XTerm == -1 {
 			// PrevLogIndex这个位置在Follower中不存在
-			rf.nextIndex[serverTo] = reply.XLen
+			DPrintf("leader %v 收到 server %v 的回退请求, 原因是log过短, 回退前的nextIndex[%v]=%v, 回退后的nextIndex[%v]=%v\n", rf.me, serverTo, serverTo, rf.nextIndex[serverTo], serverTo, reply.XLen)
+			if rf.lastIncludedIndex >= reply.XLen {
+				// 由于snapshot被截断
+				// 添加InstallSnapshot的处理
+				go rf.handleInstallSnapshot(serverTo)
+			} else {
+				rf.nextIndex[serverTo] = reply.XLen
+			}
 			return
 		}
 
 		i := rf.nextIndex[serverTo] - 1
-		for i > 0 && rf.log[i].Term > reply.XTerm {
+		if i < rf.lastIncludedIndex {
+			i = rf.lastIncludedIndex
+		}
+		for i > rf.lastIncludedIndex && rf.log[rf.RealLogIdx(i)].Term > reply.XTerm {
 			i--
 		}
-		if rf.log[i].Term == reply.XTerm {
+		if i == rf.lastIncludedIndex && rf.log[rf.RealLogIdx(i)].Term > reply.XTerm {
+			// 要找的位置已经由于snapshot被截断
+			// 添加InstallSnapshot的处理
+			go rf.handleInstallSnapshot(serverTo)
+		} else if rf.log[rf.RealLogIdx(i)].Term == reply.XTerm {
 			// PrevLogIndex发生冲突时, 冲突位置上Follower的Term Leader也有
 			// 则下一次该发给follower的日志条目的索引为此Term最后一条日志的下一个日志
 			rf.nextIndex[serverTo] = i + 1
 		} else {
 			// 之前PrevLogIndex发生冲突位置时, Follower的Term Leader没有
-			rf.nextIndex[serverTo] = reply.XIndex
+			if reply.XIndex <= rf.lastIncludedIndex {
+				// XIndex位置也被截断了
+				// 添加InstallSnapshot的处理
+				go rf.handleInstallSnapshot(serverTo)
+			} else {
+				rf.nextIndex[serverTo] = reply.XIndex
+			}
 		}
 		return
 	}
@@ -681,6 +802,121 @@ func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 
 func (rf *Raft) sendAppendEntries(serverTo int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[serverTo].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) handleInstallSnapshot(serverTo int) {
+	reply := &InstallSnapshotReply{}
+
+	rf.mu.Lock()
+
+	if rf.role != Leader {
+		// 自己已经不是Lader了, 返回
+		rf.mu.Unlock()
+		return
+	}
+
+	args := &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
+		Data:              rf.snapShot,
+		LastIncluedCmd:    rf.log[0].Cmd,
+	}
+
+	rf.mu.Unlock()
+
+	// 发送RPC时不要持有锁
+	ok := rf.sendInstallSnapshot(serverTo, args, reply)
+	if !ok {
+		// RPC发送失败, 下次再触发即可
+		return
+	}
+
+	// 发送成功
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.Term > rf.currentTerm {
+		// 自己是旧Leader
+		rf.currentTerm = reply.Term
+		rf.role = Follower
+		rf.votedFor = -1
+		rf.ResetTimer()
+		rf.persist()
+		return
+	}
+	rf.nextIndex[serverTo] = rf.VirtualLogIdx(1)
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer func() {
+		rf.ResetTimer()
+		rf.mu.Unlock()
+	}()
+
+	// 1. Reply immediately if term < currentTerm
+	// 旧leader, 拒绝
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	// 不需要实现分块的RPC
+	if args.Term > rf.currentTerm {
+		// 如果Term更大, 证明这是新的Leader, 需要更改自身状态, 但不影响继续接收快照
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+
+	rf.role = Follower
+
+	hasEntry := false
+	rIdx := 0
+	for ; rIdx < len(rf.log); rIdx++ {
+		if rf.VirtualLogIdx(rIdx) == args.LastIncludedIndex && rf.log[rIdx].Term == args.LastIncludedTerm {
+			hasEntry = true
+			break
+		}
+	}
+
+	msg := &ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+
+	if hasEntry {
+		// 如果LastIncludedIndex位置的日志项存在, 即尽管需要创建快照, 但并不导致自己错失日志项, 只需要截断日志数组即可
+		rf.log = rf.log[rIdx:]
+	} else {
+		// 如果LastIncludedIndex位置的日志项不存在, 需要清空切片, 并将0位置构造LastIncludedIndex位置的日志项进行占位
+		rf.log = make([]Entry, 0)
+		rf.log = append(rf.log, Entry{rf.lastIncludedTerm, args.LastIncluedCmd})
+	}
+
+	// 7. Discard the entire log
+	// 8. Reset state machine using snapshot contents (and load snapshot’s cluster configuration)
+	rf.snapShot = args.Data
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+
+	if rf.commitIndex < args.LastIncludedIndex {
+		rf.commitIndex = args.LastIncludedIndex
+	}
+	if rf.lastApplied < args.LastIncludedIndex {
+		rf.lastApplied = args.LastIncludedIndex
+	}
+
+	reply.Term = rf.currentTerm
+	rf.applyCh <- *msg
+	rf.persist()
+}
+
+func (rf *Raft) sendInstallSnapshot(serverTo int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[serverTo].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
 
@@ -694,17 +930,41 @@ func (rf *Raft) CommitChecker() {
 		for rf.commitIndex <= rf.lastApplied {
 			rf.condApply.Wait()
 		}
-		for rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
+		msgBuf := make([]*ApplyMsg, 0, rf.commitIndex-rf.lastApplied)
+		// 不修改rf.lastApplied，以便发送msg时，做对比，判断快照有没有修改了rf.lastApplied
+		// 如果快照修改了rf.lastApplied，则说明这条日志中的指令已被保存到了快照中，并被应用到了状态机上，则不能再将这条指令传给服务层
+		tmpApplied := rf.lastApplied
+		for rf.commitIndex > tmpApplied {
+			tmpApplied++
 			msg := &ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log[rf.lastApplied].Cmd,
-				CommandIndex: rf.lastApplied,
+				Command:      rf.log[rf.RealLogIdx(tmpApplied)].Cmd,
+				CommandIndex: tmpApplied,
+				SnapshotTerm: rf.log[rf.RealLogIdx(tmpApplied)].Term,
 			}
-			rf.applyCh <- *msg
-			DPrintf("server %v 准备将命令 %v(索引为 %v ) 应用到状态机\n", rf.me, msg.Command, msg.CommandIndex)
+			msgBuf = append(msgBuf, msg)
 		}
 		rf.mu.Unlock()
+		for _, msg := range msgBuf {
+			rf.mu.Lock()
+			if msg.CommandIndex != rf.lastApplied+1 {
+				rf.mu.Unlock()
+				continue
+			}
+
+			rf.mu.Unlock()
+			// 注意, 在解锁后可能又出现了SnapShot进而修改了rf.lastApplied
+			// todo
+			rf.applyCh <- *msg
+
+			rf.mu.Lock()
+			if msg.CommandIndex != rf.lastApplied+1 {
+				rf.mu.Unlock()
+				continue
+			}
+			rf.lastApplied = msg.CommandIndex
+			rf.mu.Unlock()
+		}
 	}
 }
 
@@ -725,8 +985,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	// 初始时，log包含一个空日志条目，因此，真正的日志条目的索引从1开始
 	rf.log = make([]Entry, 0)
 	rf.log = append(rf.log, Entry{Term: 0})
+
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 
@@ -738,10 +1000,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.ResetTimer()
 
 	// initialize from state persisted before a crash
+	// 如果读取成功, 将覆盖log, votedFor和currentTerm
+	rf.readSnapshot(persister.ReadSnapshot())
 	rf.readPersist(persister.ReadRaftState())
 
 	for i := 0; i < len(rf.nextIndex); i++ {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = rf.VirtualLogIdx(len(rf.log))
 	}
 
 	// start ticker goroutine to start elections
