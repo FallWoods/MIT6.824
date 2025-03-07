@@ -1,13 +1,24 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	leaderId  int
+	clientId  int64
+	commandId uint
+}
+
+func (ck *Clerk) GetCommandId() (SendId uint) {
+	SendId = ck.commandId
+	ck.commandId++
+	return
 }
 
 func nrand() int64 {
@@ -18,10 +29,16 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
+	// ck := new(Clerk)
+	// ck.servers = servers
 	// You'll have to add code here.
-	return ck
+
+	return &Clerk{
+		servers:   servers,
+		leaderId:  0,
+		clientId:  nrand(),
+		commandId: 0,
+	}
 }
 
 // fetch the current value for a key.
@@ -35,9 +52,25 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	args := &GetArgs{key, ck.GetCommandId(), ck.clientId}
+	for {
+		reply := &GetReply{}
+		ok := ck.servers[ck.leaderId].Call("KVServer.Get", args, reply)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrLeaderOutDated {
+			ck.leaderId++
+			ck.leaderId %= len(ck.servers)
+			continue
+		}
+
+		switch reply.Err {
+		case ErrChanClose:
+			continue
+		case ErrHandleOpTimeOut:
+			continue
+		}
+		return reply.Value
+	}
 }
 
 // shared by Put and Append.
@@ -50,6 +83,24 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := &PutAppendArgs{key, value, op, ck.GetCommandId(), ck.clientId}
+
+	for {
+		reply := &PutAppendReply{}
+		ok := ck.servers[ck.leaderId].Call("KVServer.PutAppend", args, reply)
+		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrLeaderOutDated {
+			ck.leaderId++
+			ck.leaderId %= len(ck.servers)
+			continue
+		}
+		switch reply.Err {
+		case ErrChanClose:
+			continue
+		case ErrHandleOpTimeOut:
+			continue
+		}
+		return
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
