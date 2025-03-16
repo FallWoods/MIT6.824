@@ -3,16 +3,19 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"time"
 
 	"6.5840/labrpc"
 )
 
+const RpcRetryInterval = time.Millisecond * 20
+
 type Clerk struct {
-	servers []*labrpc.ClientEnd
+	servers []*labrpc.ClientEnd // 若干个KVserver节点，有一个是Leader
 	// You will have to modify this struct.
-	leaderId  int
-	clientId  int64
-	commandId uint
+	leaderId  int   // 当前的Leader的索引
+	clientId  int64 // 唯一标识客户端
+	commandId uint  // 递增的序列号，唯一标识每个客户端的每条指令
 }
 
 func (ck *Clerk) GetCommandId() (SendId uint) {
@@ -21,6 +24,7 @@ func (ck *Clerk) GetCommandId() (SendId uint) {
 	return
 }
 
+// 随机生成一个64位整数作为的客户端标识
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
 	bigx, _ := rand.Int(rand.Reader, max)
@@ -58,15 +62,18 @@ func (ck *Clerk) Get(key string) string {
 		reply := &GetReply{}
 		ok := ck.servers[ck.leaderId].Call("KVServer.Get", args, reply)
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrLeaderOutDated {
+			if !ok {
+				reply.Err = ErrRpcFailed
+			}
 			ck.leaderId++
 			ck.leaderId %= len(ck.servers)
+			time.Sleep(RpcRetryInterval)
 			continue
 		}
 
 		switch reply.Err {
-		case ErrChanClose:
-			continue
 		case ErrHandleOpTimeOut:
+			time.Sleep(RpcRetryInterval)
 			continue
 		}
 		return reply.Value
@@ -89,14 +96,16 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		reply := &PutAppendReply{}
 		ok := ck.servers[ck.leaderId].Call("KVServer.PutAppend", args, reply)
 		if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrLeaderOutDated {
+			if !ok {
+				reply.Err = ErrRpcFailed
+			}
 			ck.leaderId++
 			ck.leaderId %= len(ck.servers)
 			continue
 		}
 		switch reply.Err {
-		case ErrChanClose:
-			continue
 		case ErrHandleOpTimeOut:
+			time.Sleep(RpcRetryInterval)
 			continue
 		}
 		return

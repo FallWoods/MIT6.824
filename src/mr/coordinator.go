@@ -1,59 +1,61 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-import "sync"
-import "time"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
 type TaskStatus int
 
 // Task状态
 const (
-	idle TaskStatus = iota		// 闲置未分配
-	running						// 正在运行
-	finished					// 完成
-	failed						// 失败
+	idle     TaskStatus = iota // 闲置未分配
+	running                    // 正在运行
+	finished                   // 完成
+	failed                     // 失败
 )
 
 // Map Task 执行状态
 type MapTaskInfo struct {
-	TaskId int			// Task序号
-	Status TaskStatus	// 执行状态
-	StartTime int64		// 开始执行的时间戳
+	TaskId    int        // Task序号
+	Status    TaskStatus // 执行状态
+	StartTime int64      // 开始执行的时间戳
 }
 
 // Reduce Task 执行状态
 type ReduceTaskInfo struct {
 	// ReduceTask的序号由其所在数组下标决定, 不进行额外存储
-	Status TaskStatus	// 执行状态
-	StartTime int64		// 开始执行的时间戳
+	Status    TaskStatus // 执行状态
+	StartTime int64      // 开始执行的时间戳
 }
 
 type Coordinator struct {
 	// Your definitions here.
-	NReduce 	int		// the number of reduce task
-	MapTasks	map[string]*MapTaskInfo	// MapTaskInfo
-	muMap 			sync.Mutex		// 锁
-	muReduce 		sync.Mutex		// 锁
-	ReduceTasks []*ReduceTaskInfo		// ReduceTaskInfo，每个ReduceTaskInfo关联的是对应其下标的Reducetask
-	MapComplete bool	// 指示Map任务是否完成
-	ReduceComplete bool // 指示Reduce任务是否完成
+	NReduce        int                     // the number of reduce task
+	MapTasks       map[string]*MapTaskInfo // MapTaskInfo
+	muMap          sync.Mutex
+	muReduce       sync.Mutex
+	ReduceTasks    []*ReduceTaskInfo // ReduceTaskInfo，每个ReduceTaskInfo关联的是对应其下标的Reducetask
+	MapComplete    bool              // 指示Map任务是否完成
+	ReduceComplete bool              // 指示Reduce任务是否完成
 }
 
 // 初始化协调者用于管理任务的数据结构
 func (c *Coordinator) initTask(files []string) {
 	for idx, fileName := range files {
-		c.MapTasks[fileName] = &MapTaskInfo {
-			TaskId : idx,
-			Status : idle,
+		c.MapTasks[fileName] = &MapTaskInfo{
+			TaskId: idx,
+			Status: idle,
 		}
 	}
 	for idx := range c.ReduceTasks {
-		c.ReduceTasks[idx] = &ReduceTaskInfo {
-			Status : idle,
+		c.ReduceTasks[idx] = &ReduceTaskInfo{
+			Status: idle,
 		}
 	}
 }
@@ -63,10 +65,7 @@ func (c *Coordinator) AskForTask(req *MessageSend, reply *MessageReply) error {
 	if req.MessageCategory != AskForTask {
 		return BadMsgType
 	}
-	// c.muMap.Lock()
-	// c.muReduce.Lock()
-	// defer c.muMap.Unlock()
-	// defer c.muReduce.Unlock()
+
 	c.muMap.Lock()
 	if !c.MapComplete {
 		// 记录已经完成的Map任务的个数
@@ -95,9 +94,9 @@ func (c *Coordinator) AskForTask(req *MessageSend, reply *MessageReply) error {
 				reply.MapTaskName = fileName
 				reply.NReduce = c.NReduce
 				reply.TaskId = taskinfo.TaskId
-	
-				// log.Printf("coordinator: apply Map Task: taskID = %v\n", reply.TaskId)
-	
+
+				log.Printf("coordinator: apply Map Task: taskID = %v\n", reply.TaskId)
+
 				// 修改状态信息
 				taskinfo.Status = running
 				taskinfo.StartTime = time.Now().Unix()
@@ -105,7 +104,7 @@ func (c *Coordinator) AskForTask(req *MessageSend, reply *MessageReply) error {
 				return nil
 			}
 		}
-		if (mapTaskSuccessCount < len(c.MapTasks)) {
+		if mapTaskSuccessCount < len(c.MapTasks) {
 			// Map任务还没有全部完成，但暂时也没有可分配的任务，则令该worker暂时休眠一段时间
 			reply.MessageCategory = Wait
 			c.muMap.Unlock()
@@ -131,14 +130,14 @@ func (c *Coordinator) AskForTask(req *MessageSend, reply *MessageReply) error {
 				if (curTime - taskinfo.StartTime) > 10 {
 					flag = true
 				}
-			}else {
+			} else {
 				reduceTasksSuccessCount++
 			}
 			if flag {
 				reply.MessageCategory = ReduceTaskAlloc
 				reply.NReduce = c.NReduce
 				reply.TaskId = idx
-				// log.Printf("coordinator: apply Reduce Task: taskID = %v\n", reply.TaskId)
+				log.Printf("coordinator: apply Reduce Task: taskID = %v\n", reply.TaskId)
 
 				taskinfo.Status = running
 				taskinfo.StartTime = time.Now().Unix()
@@ -169,23 +168,23 @@ func (c *Coordinator) NoticeResult(req *MessageSend, reply *MessageReply) error 
 		for _, v := range c.MapTasks {
 			if v.TaskId == req.TaskId {
 				v.Status = finished
-				// log.Printf("coordinator: map task%v finished\n", v.TaskId)
+				log.Printf("coordinator: map task%v finished\n", v.TaskId)
 				break
 			}
 		}
 		c.muMap.Unlock()
-	// Reduce任务成功
+		// Reduce任务成功
 	} else if req.MessageCategory == ReduceSuccess {
 		c.muReduce.Lock()
 		c.ReduceTasks[req.TaskId].Status = finished
 		c.muReduce.Unlock()
-		// log.Printf("coordinator: reduce task%v finished\n", req.TaskId)
+		log.Printf("coordinator: reduce task%v finished\n", req.TaskId)
 	} else if req.MessageCategory == MapFailed {
 		c.muMap.Lock()
 		for _, v := range c.MapTasks {
 			if v.TaskId == req.TaskId {
 				v.Status = failed
-				// log.Printf("coordinator: map task%v failed\n", v.TaskId)
+				log.Printf("coordinator: map task%v failed\n", v.TaskId)
 				break
 			}
 		}
@@ -194,27 +193,12 @@ func (c *Coordinator) NoticeResult(req *MessageSend, reply *MessageReply) error 
 		c.muReduce.Lock()
 		c.ReduceTasks[req.TaskId].Status = finished
 		c.muReduce.Unlock()
-		// log.Printf("coordinator: reduce task%v failed\n", req.TaskId)
+		log.Printf("coordinator: reduce task%v failed\n", req.TaskId)
 	}
 	return nil
 }
 
-
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-// func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-// 	reply.Y = args.X + 1
-// 	return nil
-// }
-
-
-//
 // start a thread that listens for RPCs from worker.go
-//
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -225,9 +209,9 @@ func (c *Coordinator) server() {
 	sockname := coordinatorSock()
 	// 如果之前已经存在，则删除之
 	if err := os.Remove(sockname); err != nil && !os.IsNotExist(err) {
-        log.Fatal("Error removing existing socket:", err)
-        return
-    }
+		log.Fatal("Error removing existing socket:", err)
+		return
+	}
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
@@ -235,10 +219,8 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-//
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
-//
 func (c *Coordinator) Done() bool {
 
 	// Your code here.
@@ -263,20 +245,17 @@ func (c *Coordinator) Done() bool {
 	return true
 }
 
-//
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-//
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		NReduce : nReduce,
-		MapTasks : make(map[string]*MapTaskInfo),
-		ReduceTasks : make([]*ReduceTaskInfo, nReduce),
-		MapComplete : false,
-		ReduceComplete : false,
+		NReduce:        nReduce,
+		MapTasks:       make(map[string]*MapTaskInfo),
+		ReduceTasks:    make([]*ReduceTaskInfo, nReduce),
+		MapComplete:    false,
+		ReduceComplete: false,
 	}
-
 
 	// Your code here.
 	// 由于每一个文件名就是一个map task ,需要初始化任务状态

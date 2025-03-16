@@ -4,9 +4,9 @@ const (
 	OK                 = "OK"
 	ErrNoKey           = "ErrNoKey"
 	ErrWrongLeader     = "ErrWrongLeader"
-	ErrChanClose       = "ErrChanClose"
 	ErrHandleOpTimeOut = "ErrHandleOpTimeOut"
 	ErrLeaderOutDated  = "ErrLeaderOutDated"
+	ErrRpcFailed       = "ErrRpcFailed"
 )
 
 type Err string
@@ -19,8 +19,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	CommandId uint
-	ClientId  int64
+	CommandId uint  // 指令序号
+	ClientId  int64 // 唯一标识客户端
 }
 
 type PutAppendReply struct {

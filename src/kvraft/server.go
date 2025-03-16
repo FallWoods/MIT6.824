@@ -14,7 +14,7 @@ import (
 
 const Debug = false
 
-const HandleOpTimeOut = time.Millisecond * 500
+const HandleOpTimeOut = time.Millisecond * 250
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -51,20 +51,19 @@ type KVServer struct {
 
 	// Your definitions here.
 
-	waitCh     map[int]*chan result // 映射 startIndex->ch
-	historyMap map[int64]*result    // 映射 client->*result
-	maxMapLen  int
-	db         map[string]string
+	waitCh     map[int]*chan result // 存储每一条指令对应的通道，此通道用来接收指令的执行结果
+	historyMap map[int64]*result    // 存储每个客户端上一条指令的结果
+	db         map[string]string    // 数据库
 
 	persister   *raft.Persister
 	lastApplied int // 当前服务器中状态机所执行的最后一条指令的索引（在Raft中日志的索引）
 }
 
 type result struct {
-	LastId  uint // 产生这条结果的指令的序号
-	Err     Err
-	Value   string
-	ResTerm int // 这条指令被提交时的任期
+	CommandId   uint // 产生这条结果的指令的序号
+	Err         Err
+	Value       string
+	CommandTerm int // 这条指令被提交时的任期
 }
 
 // 生成快照
@@ -120,10 +119,6 @@ func (kv *KVServer) LogInfoReceive(opArgs *Op, logType int) {
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
 	opArgs := &Op{
 		OpType:    OpGet,
 		ClientId:  args.ClinetId,
@@ -137,10 +132,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
 
 	opArgs := &Op{
 		ClientId:  args.ClientId,
@@ -160,6 +151,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) HandleOp(opArgs *Op) (res result) {
+	// 先判断这个操作是否已经执行过了，存在对应的历史记录
+	kv.mu.Lock()
+	if hisRes, exist := kv.historyMap[opArgs.ClientId]; exist && hisRes.CommandId == opArgs.CommandId {
+		kv.mu.Unlock()
+		return *hisRes
+	}
+
+	kv.mu.Unlock()
+
 	// 提交一个操作到Raft层，然后等待ApplyHandler执行指令后，返回结果
 	startIndex, startTerm, isLeader := kv.rf.Start(*opArgs)
 	if !isLeader {
@@ -186,14 +186,8 @@ func (kv *KVServer) HandleOp(opArgs *Op) (res result) {
 		DPrintf("server %v client %v command %v: 超时", kv.me, opArgs.ClientId, opArgs.CommandId)
 		return
 	case msg, success := <-newCh:
-		if success && msg.ResTerm == startTerm {
+		if success && msg.CommandTerm == startTerm {
 			res = msg
-			return
-		} else if !success {
-			// 通道已经关闭, 有另一个协程收到了消息 或 通道被更新的RPC覆盖
-			// TODO: 是否需要判断消息到达时自己已经不是leader了?
-			DPrintf("server %v identifier %v Seq %v: 通道已经关闭, 有另一个协程收到了消息 或 更新的RPC覆盖, args.OpType=%v, args.Key=%+v", kv.me, opArgs.ClientId, opArgs.CommandId, opArgs.OpType, opArgs.Key)
-			res.Err = ErrChanClose
 			return
 		} else {
 			// term与一开始不匹配, 说明这个Leader可能过期了
@@ -204,9 +198,10 @@ func (kv *KVServer) HandleOp(opArgs *Op) (res result) {
 	}
 }
 
+// 具体负责执行的函数
 func (kv *KVServer) DBExecute(op *Op) (res result) {
 	// 调用该函数需要持有锁
-	res.LastId = op.CommandId
+	res.CommandId = op.CommandId
 	switch op.OpType {
 	case OpGet:
 		val, exist := kv.db[op.Key]
@@ -253,14 +248,18 @@ func (kv *KVServer) ApplyHandler() {
 			kv.lastApplied = log.CommandIndex
 
 			// 需要判断这个log是否需要被再次应用
+			// 可能的情况：客户端的同一条指令，第一次发送时，成功送到了raft层，但很长时间还没提交，HandleOp超时，返回错误，
+			// 客户端第二次发送，此时，在handleOp处，第一次发送的指令依然没有提交，因此，第二次发送的指令送到raft层。
+			// 此时，第一次发送的指令被提交，然后在ApplyHandler中执行，但由于发送它的HandleOp已经超时，因此，没有传回结果。
+			// 只是将结果记录下来。当第二次提交的指令被提交时，在ApplyHandler中，我们不能执行它，必须检查是否已经执行了。
 			var res result
 
 			needApply := false
 			if lastRes, exist := kv.historyMap[op.ClientId]; exist {
-				if lastRes.LastId == op.CommandId {
-					// clientId和commandId均相等，说明历史记录存在 直接套用历史记录
+				if lastRes.CommandId == op.CommandId {
+					// clientId和commandId均相等，说明历史记录存在 直接用历史记录
 					res = *lastRes
-				} else if lastRes.LastId < op.CommandId {
+				} else if lastRes.CommandId < op.CommandId {
 					needApply = true
 				}
 			} else {
@@ -271,13 +270,13 @@ func (kv *KVServer) ApplyHandler() {
 			if needApply {
 				// 执行
 				res = kv.DBExecute(&op)
-				res.ResTerm = log.SnapshotTerm
+				res.CommandTerm = log.SnapshotTerm
 
 				// 更新历史记录
 				kv.historyMap[op.ClientId] = &res
 			}
 
-			// Leader还需要额外通知handler处理clerk回复
+			// 对于Leader还需要额外通知handler处理clerk回复
 			ch, exist := kv.waitCh[log.CommandIndex]
 			if exist {
 				kv.mu.Unlock()
@@ -289,7 +288,7 @@ func (kv *KVServer) ApplyHandler() {
 							DPrintf("leader %v ApplyHandler 发现 client %v Seq %v 的管道不存在, 应该是超时被关闭了", kv.me, op.ClientId, op.CommandId)
 						}
 					}()
-					res.ResTerm = log.SnapshotTerm
+					res.CommandTerm = log.SnapshotTerm
 					// 执行一条指令后，通过channel把结果发送给HandlerOp，进行后续处理
 					*ch <- res
 				}()
@@ -358,7 +357,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 100)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.persister = persister
 

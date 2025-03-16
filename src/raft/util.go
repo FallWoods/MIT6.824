@@ -4,6 +4,7 @@ import (
 	"log"
 	"math/rand"
 )
+
 // Debugging
 const Debug = false
 
@@ -14,7 +15,8 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-func GetRandomElectTimeout(rd *rand.Rand) int {
-	plusMs := int(rd.Float64() * 500.0)
+// 180 < TimeOut < 300
+func GetRandomElectTimeOut(rd *rand.Rand) int {
+	plusMs := int(rd.Float64() * 160.0)
 	return plusMs + ElectTimeOutBase
 }

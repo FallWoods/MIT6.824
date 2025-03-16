@@ -1,22 +1,19 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"io"
 	"log"
 	"net/rpc"
-	"hash/fnv"
-	"encoding/json"
-	"io"
 	"os"
 	"sort"
 	"strconv"
 	"time"
 )
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
@@ -37,20 +34,15 @@ func (a ByKey) Less(i, j int) bool {
 	return a[i].Key < a[j].Key
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
@@ -62,11 +54,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		switch reply.MessageCategory {
 		case MapTaskAlloc:
 			// 分配了Map任务
-			err :=HandleMapTask(reply, mapf)
+			err := HandleMapTask(reply, mapf)
 			if err == nil {
 				_ = CallForReportStatus(MapSuccess, reply.TaskId)
-            } else {
-				// log.Println("Worker: Map Task failed, error: ", err)
+			} else {
+				log.Println("Worker: Map Task failed, error: ", err)
 				_ = CallForReportStatus(MapFailed, reply.TaskId)
 			}
 		case ReduceTaskAlloc:
@@ -78,10 +70,10 @@ func Worker(mapf func(string, string) []KeyValue,
 				// log.Println("Worker: Map Task failed, error", err)
 				_ = CallForReportStatus(ReduceFailed, reply.TaskId)
 			}
-		case Wait :
+		case Wait:
 			// 没有任务可分配，但任务还没执行完，不能终止，只能等待一会
 			time.Sleep(time.Second * 5)
-		case Shutdown :
+		case Shutdown:
 			// 所有任务执行完毕，终止
 			os.Exit(0)
 		}
@@ -89,7 +81,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
-func HandleMapTask(reply *MessageReply, mapf func (string, string) []KeyValue) error {
+func HandleMapTask(reply *MessageReply, mapf func(string, string) []KeyValue) error {
 	file, err := os.Open(reply.MapTaskName)
 	if err != nil {
 		return err
@@ -103,26 +95,26 @@ func HandleMapTask(reply *MessageReply, mapf func (string, string) []KeyValue) e
 	kvarr := mapf(reply.MapTaskName, string(content))
 	sort.Sort(ByKey(kvarr))
 
-	// // 中间输出文件名的前缀
+	// 中间输出文件名的前缀
 	// oname_prefix := "mr-out-" + strconv.Itoa(reply.TaskId) + "-"
 	// key_vgroup := make(map[string][]string)
 	// for _, kv := range kvarr {
 	// 	key_vgroup[kv.Key] = append(key_vgroup[kv.Key], kv.Value)
 	// }
-	// // 先清理可能存在的垃圾，先前执行的任务可能失败，存在着未完成的文件
-	// // TODO: 原子重命名的方法
+	// 先清理可能存在的垃圾，先前执行的任务可能失败，存在着未完成的文件
+	// TODO: 原子重命名的方法
 	// _ = DelFileByMapId(reply.TaskId,"./")
 
 	// for key, values := range key_vgroup {
-	// 	// 根据键计算中间键值对的输出文件
+	// 根据键计算中间键值对的输出文件
 	// 	redId := ihash(key)
 	// 	oname := oname_prefix + strconv.Itoa(redId % reply.NReduce)
 	// 	var ofile *os.File
 	// 	if _, err = os.Stat(oname); os.IsNotExist(err) {
-	// 		// 文件不存在，则创建之
+	// 		文件不存在，则创建之
 	// 		ofile, _ = os.Create(oname)
 	// 	} else {
-	// 		// 文件存在，则只是打开它
+	// 		文件存在，则只是打开它
 	// 		ofile, _ = os.OpenFile(oname, os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
 	// 	}
 	// 	enc := json.NewEncoder(ofile)
@@ -142,7 +134,7 @@ func HandleMapTask(reply *MessageReply, mapf func (string, string) []KeyValue) e
 	for _, kv := range kvarr {
 		redId := ihash(kv.Key) % reply.NReduce
 		if encoders[redId] == nil {
-			tempFile, err := os.CreateTemp("./",fmt.Sprintf("mr-map-tmp-%d",redId))
+			tempFile, err := os.CreateTemp("./", fmt.Sprintf("mr-map-tmp-%d", redId))
 			if err != nil {
 				return err
 			}
@@ -155,7 +147,7 @@ func HandleMapTask(reply *MessageReply, mapf func (string, string) []KeyValue) e
 			return err
 		}
 	}
-	for i, file :=  range tempFiles {
+	for i, file := range tempFiles {
 		if file != nil {
 			fileName := file.Name()
 			newName := fmt.Sprintf("mr-out-%d-%d", reply.TaskId, i)
@@ -167,11 +159,11 @@ func HandleMapTask(reply *MessageReply, mapf func (string, string) []KeyValue) e
 	return nil
 }
 
-func HandleReduceTask(reply *MessageReply, reducef func(string, []string ) string) error {
+func HandleReduceTask(reply *MessageReply, reducef func(string, []string) string) error {
 	reduceNum := reply.TaskId
 	key_vgroup := make(map[string][]string)
 
-	fileList, err := ReadSpecificFile(reduceNum,"./")
+	fileList, err := ReadSpecificFile(reduceNum, "./")
 	if err != nil {
 		return err
 	}
@@ -195,7 +187,7 @@ func HandleReduceTask(reply *MessageReply, reducef func(string, []string ) strin
 	}
 	sort.Strings(keys)
 
-	oname := "mr-out-" +strconv.Itoa(reply.TaskId)
+	oname := "mr-out-" + strconv.Itoa(reply.TaskId)
 
 	ofile, err := os.Create(oname)
 
@@ -206,13 +198,13 @@ func HandleReduceTask(reply *MessageReply, reducef func(string, []string ) strin
 
 	for _, key := range keys {
 		output := reducef(key, key_vgroup[key])
-		_, err = fmt.Fprintf(ofile,"%v %v\n",key,output)
+		_, err = fmt.Fprintf(ofile, "%v %v\n", key, output)
 		if err != nil {
 			return err
 		}
 	}
 
-	DelFileByReduceId(reply.TaskId,"./")
+	DelFileByReduceId(reply.TaskId, "./")
 	return nil
 }
 
@@ -220,20 +212,20 @@ func HandleReduceTask(reply *MessageReply, reducef func(string, []string ) strin
 func CallForReportStatus(messageType MsgType, taskId int) error {
 	// 报告Task执行情况
 	// declare an argument structure.
-	args := MessageSend {
-		MessageCategory : messageType,
-		TaskId : taskId,
+	args := MessageSend{
+		MessageCategory: messageType,
+		TaskId:          taskId,
 	}
 	// 通过rpc调用Coordinator.NoticeResult()，不需要返回值，因此，第二个指针为nil
-	err := call("Coordinator.NoticeResult",&args,nil)
+	err := call("Coordinator.NoticeResult", &args, nil)
 	return err
 }
 
 // worker向coordinator请求一个任务
 func CallForTask() *MessageReply {
 	// declare an argument structure.
-	args := MessageSend {
-		MessageCategory : AskForTask,
+	args := MessageSend{
+		MessageCategory: AskForTask,
 	}
 	// declare a reply structure.
 	reply := MessageReply{}
@@ -241,10 +233,10 @@ func CallForTask() *MessageReply {
 	// send the RPC request, wait for the reply.
 	err := call("Coordinator.AskForTask", &args, &reply)
 
-	if err== nil {
+	if err == nil {
 		// fmt.Printf("TaskName %v, NReduce %v, taskID %v\n", reply.MapTaskName, reply.NReduce, reply.TaskId)
-        return &reply
-    } else {
+		return &reply
+	} else {
 		// log.Println(err.Error())
 		return nil
 	}
